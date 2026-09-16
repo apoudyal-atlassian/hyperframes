@@ -226,13 +226,29 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
     dir = makeTempDir();
   });
 
+  // `.concat` rather than a spread inside an array literal: this is an FFMPEG
+  // wrapper, whose trailing positional is an OUTPUT path and therefore takes no
+  // `--` terminator, but a verbosity-flag-then-spread array literal is
+  // indistinguishable from the ffPROBE wrapper shape that must have one. See
+  // the `SPREAD_WRAPPER` matcher in
+  // `producer/src/utils/ffprobeArgvContract.test.ts`, which reads raw source —
+  // so an example argv in a comment trips it too.
   const run = (args: string[]): void => {
-    const res = spawnSync(getFfmpegBinary(), ["-v", "error", ...args], { encoding: "utf-8" });
+    const argv = ["-v", "error"].concat(args);
+    const res = spawnSync(getFfmpegBinary(), argv, { encoding: "utf-8" });
     if (res.status !== 0) throw new Error(`ffmpeg failed: ${res.stderr ?? ""}`);
   };
 
-  const probe = (args: string[]): string => {
-    const res = spawnSync(getFfprobeBinary(), ["-v", "error", ...args], { encoding: "utf-8" });
+  /**
+   * `inputPath` is a parameter rather than the caller's last argv entry so the
+   * `--` terminator is the penultimate literal token, which is what
+   * `producer/src/utils/ffprobeArgvContract.test.ts` checks at the source level
+   * across the whole tree — a `join(dir, name)` call in that slot reads as two
+   * comma-separated entries to its parser and trips the gate.
+   */
+  const probe = (inputPath: string, args: readonly string[]): string => {
+    const argv = ["-v", "error", ...args, "--", inputPath];
+    const res = spawnSync(getFfprobeBinary(), argv, { encoding: "utf-8" });
     if (res.status !== 0) throw new Error(`ffprobe failed: ${res.stderr ?? ""}`);
     return res.stdout.trim();
   };
@@ -323,13 +339,11 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
     }
 
     const probedDuration = Number.parseFloat(
-      probe([
+      probe(join(outputDir, HLS_VIDEO_PLAYLIST), [
         "-show_entries",
         "format=duration",
         "-of",
         "csv=p=0",
-        "--",
-        join(outputDir, HLS_VIDEO_PLAYLIST),
       ]),
     );
     expect(Math.abs(probedDuration - DURATION)).toBeLessThanOrEqual(1 / FPS);
@@ -346,7 +360,7 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
       .sort();
     expect(segments.length).toBeGreaterThan(1);
     for (const segment of segments) {
-      const firstFrame = probe([
+      const firstFrame = probe(join(outputDir, segment), [
         "-select_streams",
         "v",
         "-show_frames",
@@ -356,8 +370,6 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
         "csv=p=0",
         "-read_intervals",
         "%+#1",
-        "--",
-        join(outputDir, segment),
       ]);
       expect(firstFrame.split(",")[0]).toBe("1");
     }
@@ -387,7 +399,7 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
       segmentSeconds: SEGMENT_SECONDS,
     });
 
-    const audioPts = probe([
+    const audioPts = probe(join(outputDir, HLS_AUDIO_PLAYLIST), [
       "-select_streams",
       "a",
       "-show_entries",
@@ -396,13 +408,11 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
       "csv=p=0",
       "-read_intervals",
       "%+#3",
-      "--",
-      join(outputDir, HLS_AUDIO_PLAYLIST),
     ])
       .split("\n")
       .map((line) => Number.parseFloat(line));
     const videoPts = Number.parseFloat(
-      probe([
+      probe(join(outputDir, HLS_VIDEO_PLAYLIST), [
         "-select_streams",
         "v",
         "-show_entries",
@@ -411,8 +421,6 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
         "csv=p=0",
         "-read_intervals",
         "%+#1",
-        "--",
-        join(outputDir, HLS_VIDEO_PLAYLIST),
       ]).split("\n")[0]!,
     );
 
