@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -785,6 +786,35 @@ export const HLS_MASTER_PLAYLIST = "master.m3u8";
 export const HLS_VIDEO_PLAYLIST = "video.m3u8";
 export const HLS_AUDIO_PLAYLIST = "audio.m3u8";
 
+/**
+ * Drop the standalone audio-only variant ffmpeg's `-var_stream_map` adds to
+ * the master playlist.
+ *
+ * With `a:0,agroup:aud` the hls muxer lists the audio rendition twice: as the
+ * `#EXT-X-MEDIA:TYPE=AUDIO` entry the video variant references (wanted), and
+ * again as its own `#EXT-X-STREAM-INF` variant with no `RESOLUTION` (not
+ * wanted). That is valid HLS, but a player choosing variants by bandwidth can
+ * pick it and play sound with no picture, and the VOD consumer asked for a
+ * single rendition. A variant tag without a `RESOLUTION` attribute is
+ * audio-only; its URI is always the following line, so both go.
+ */
+export function stripAudioOnlyVariants(masterPlaylist: string): string {
+  const lines = masterPlaylist.split("\n");
+  const kept: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.startsWith("#EXT-X-STREAM-INF:") && !line.includes("RESOLUTION=")) {
+      // ffmpeg separates variants with a blank line; drop the one before this
+      // variant so the master does not end up with two in a row.
+      if (kept.at(-1) === "") kept.pop();
+      i += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
+
 export interface PackageHlsOptions extends Partial<Pick<EngineConfig, "ffmpegProcessTimeout">> {
   /** Whole seconds, so it matches the integer `EXT-X-TARGETDURATION` ffmpeg writes. */
   segmentSeconds: number;
@@ -795,6 +825,8 @@ export interface PackageHlsOptions extends Partial<Pick<EngineConfig, "ffmpegPro
  * Stream-copy an H.264 video (and optional AAC sidecar) into an HLS VOD
  * directory: `master.m3u8`, `video.m3u8` + `video_%05d.ts`, and `audio.m3u8` +
  * `audio_%05d.ts` when audio is given. `outputPath` in the result is the directory.
+ * The master carries exactly one `#EXT-X-STREAM-INF` variant (the video, with
+ * the audio attached as a rendition group); see `stripAudioOnlyVariants`.
  *
  * `-hls_time` cuts at the first keyframe at or after each target, so the input
  * must be encoded with the GOP lock (`gopSize = segmentSeconds × fps`). The lock
@@ -865,6 +897,13 @@ export async function packageHls(
       durationMs: result.durationMs,
       error: "FFmpeg HLS packaging cancelled",
     };
+  }
+  if (result.success && hasAudio) {
+    const masterPath = join(outputDir, HLS_MASTER_PLAYLIST);
+    // Guarded because the argument-level tests stub ffmpeg and never write it.
+    if (existsSync(masterPath)) {
+      writeFileSync(masterPath, stripAudioOnlyVariants(readFileSync(masterPath, "utf-8")), "utf-8");
+    }
   }
   return {
     success: result.success,
