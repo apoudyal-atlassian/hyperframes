@@ -7,14 +7,18 @@
  */
 
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  ftruncateSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "fs";
 import { join, dirname, extname } from "path";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
@@ -900,9 +904,25 @@ export async function packageHls(
   }
   if (result.success && hasAudio) {
     const masterPath = join(outputDir, HLS_MASTER_PLAYLIST);
-    // Guarded because the argument-level tests stub ffmpeg and never write it.
-    if (existsSync(masterPath)) {
-      writeFileSync(masterPath, stripAudioOnlyVariants(readFileSync(masterPath, "utf-8")), "utf-8");
+    // One descriptor for the read-modify-write: re-resolving the path to write
+    // it back races anything else in this predictable temp dir, and `r+` with
+    // owner-only mode neither creates nor widens the playlist ffmpeg wrote.
+    // A missing one is fine — the argument-level tests stub ffmpeg.
+    let master: number | undefined;
+    try {
+      master = openSync(masterPath, "r+", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (master !== undefined) {
+      try {
+        const stripped = stripAudioOnlyVariants(readFileSync(master, "utf-8"));
+        // Stripping only shortens the playlist; truncate or the tail survives.
+        ftruncateSync(master, 0);
+        writeSync(master, stripped, 0, "utf-8");
+      } finally {
+        closeSync(master);
+      }
     }
   }
   return {
