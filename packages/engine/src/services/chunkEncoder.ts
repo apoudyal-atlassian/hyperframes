@@ -781,6 +781,103 @@ export async function muxVideoWithAudio(
   };
 }
 
+export const HLS_MASTER_PLAYLIST = "master.m3u8";
+export const HLS_VIDEO_PLAYLIST = "video.m3u8";
+export const HLS_AUDIO_PLAYLIST = "audio.m3u8";
+
+export interface PackageHlsOptions extends Partial<Pick<EngineConfig, "ffmpegProcessTimeout">> {
+  /** Target segment length, whole seconds only. */
+  segmentSeconds: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Package an already-encoded H.264 video (and optional AAC sidecar) into an HLS
+ * VOD directory with `-c copy` — no re-encode. Writes `master.m3u8`,
+ * `video.m3u8` + `video_%05d.ts`, and when `audioPath` is given `audio.m3u8` +
+ * `audio_%05d.ts` as a separate rendition. `outputPath` in the result is the
+ * directory, not a file.
+ *
+ * The caller must have encoded with `lockGopForChunkConcat: true` and
+ * `gopSize = segmentSeconds × fps`: `-hls_time` can only cut at the first
+ * keyframe at or after each target, so without the lock segment lengths are
+ * whatever the encoder's own keyframe placement allows. The lock is
+ * software-encoder only (see `appendLockedGopArgs`), so a GPU encode cannot
+ * produce fixed-length segments.
+ */
+export async function packageHls(
+  videoPath: string,
+  audioPath: string | null,
+  outputDir: string,
+  options: PackageHlsOptions,
+): Promise<MuxResult> {
+  const { segmentSeconds, signal } = options;
+  if (!Number.isInteger(segmentSeconds) || segmentSeconds <= 0) {
+    throw new Error(
+      `[chunkEncoder] packageHls requires a positive integer segmentSeconds (received ${String(segmentSeconds)})`,
+    );
+  }
+
+  // ffmpeg does not create the directory for the segment/playlist patterns; it
+  // fails opening the first segment instead.
+  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+
+  const hasAudio = audioPath !== null;
+  const args = hasAudio
+    ? ["-i", videoPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0"]
+    : ["-i", videoPath, "-map", "0:v:0"];
+
+  args.push(
+    "-c",
+    "copy",
+    "-f",
+    "hls",
+    "-hls_time",
+    String(segmentSeconds),
+    // vod also forces hls_list_size to 0, so the playlists keep every segment.
+    "-hls_playlist_type",
+    "vod",
+    "-hls_flags",
+    "independent_segments",
+    "-hls_segment_type",
+    "mpegts",
+    "-var_stream_map",
+    hasAudio ? "v:0,agroup:aud,name:video a:0,agroup:aud,name:audio" : "v:0,name:video",
+    "-master_pl_name",
+    HLS_MASTER_PLAYLIST,
+    "-hls_segment_filename",
+    join(outputDir, "%v_%05d.ts"),
+  );
+
+  // No `appendRenderProvenanceArgs`: it writes mov-family container tags that
+  // MPEG-TS drops, and `-movflags` is not valid for `-f hls`. Provenance does
+  // not survive to an HLS delivery.
+  //
+  // No `-avoid_negative_ts`, for the same reason as `muxVideoWithAudio`:
+  // overriding ffmpeg's default discards the AAC priming the sidecar encode
+  // created, shifting audio against video by one frame. See issue #3487.
+  args.push("-y", join(outputDir, "%v.m3u8"));
+
+  const processTimeout = options.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
+  const result = await runFfmpeg(args, { signal, timeout: processTimeout });
+
+  if (signal?.aborted) {
+    return {
+      success: false,
+      outputPath: outputDir,
+      durationMs: result.durationMs,
+      error: "FFmpeg HLS packaging cancelled",
+    };
+  }
+  return {
+    success: result.success,
+    outputPath: outputDir,
+    durationMs: result.durationMs,
+    error: !result.success ? formatFfmpegError(result.exitCode, result.stderr) : undefined,
+    failureReason: result.failureReason,
+  };
+}
+
 export async function applyFaststart(
   inputPath: string,
   outputPath: string,
