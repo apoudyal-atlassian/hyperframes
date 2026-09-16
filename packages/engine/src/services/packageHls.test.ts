@@ -10,6 +10,7 @@ import {
   HLS_MASTER_PLAYLIST,
   HLS_VIDEO_PLAYLIST,
   appendLockedGopArgs,
+  lockedGopCodecParams,
 } from "./chunkEncoder.js";
 
 const HAS_FFMPEG = spawnSync(getFfmpegBinary(), ["-version"], { encoding: "utf-8" }).status === 0;
@@ -104,8 +105,6 @@ describe("packageHls arguments", () => {
   });
 
   it("never re-encodes", async () => {
-    // The premise of the format: the mp4 already holds the finished encode, so
-    // a `-c:v`/`-crf` here would mean every HLS render pays a second one.
     const { args } = await capturePackageHlsArgs("/tmp/audio.m4a", { segmentSeconds: 4 });
 
     expect(argValue(args, "-c")).toBe("copy");
@@ -123,6 +122,12 @@ describe("packageHls arguments", () => {
     expect(argValue(args, "-hls_flags")).toBe("independent_segments");
     expect(argValue(args, "-hls_segment_type")).toBe("mpegts");
     expect(argValue(args, "-master_pl_name")).toBe(HLS_MASTER_PLAYLIST);
+  });
+
+  it("zeroes the mpegts mux base", async () => {
+    const { args } = await capturePackageHlsArgs("/tmp/audio.m4a", { segmentSeconds: 4 });
+    expect(argValue(args, "-muxdelay")).toBe("0");
+    expect(argValue(args, "-muxpreload")).toBe("0");
   });
 
   it("passes segmentSeconds through to -hls_time", async () => {
@@ -184,8 +189,6 @@ describe("packageHls arguments", () => {
 });
 
 describe("packageHls segmentSeconds validation", () => {
-  // Throwing beats a silent default, which would ship wrong-length segments
-  // that only fail in the downstream player.
   it.each([0, -4, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
     "throws on segmentSeconds=%s",
     async (segmentSeconds) => {
@@ -195,6 +198,22 @@ describe("packageHls segmentSeconds validation", () => {
       ).rejects.toThrow(/positive integer segmentSeconds/);
     },
   );
+});
+
+describe("packageHls outputDir validation", () => {
+  it("rejects a directory containing % before spawning ffmpeg", async () => {
+    const { spawn, calls } = createSpawnSpy();
+    vi.resetModules();
+    vi.doMock("child_process", () => ({ spawn }));
+    const { packageHls } = await import("./chunkEncoder.js");
+
+    const outputDir = join(makeTempDir(), "pct%20dir");
+    await expect(
+      packageHls("/tmp/video.mp4", null, outputDir, { segmentSeconds: 4 }),
+    ).rejects.toThrow(/outputDir must not contain "%"/);
+    expect(calls).toHaveLength(0);
+    expect(existsSync(outputDir)).toBe(false);
+  });
 });
 
 describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
@@ -218,11 +237,13 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
     return res.stdout.trim();
   };
 
-  /** Encoded through the real `appendLockedGopArgs`, not a hand-written copy. */
+  /** Same GOP lock args `buildEncoderArgs` emits for the software path. */
   const lockedVideo = (): string => {
     const path = join(dir, "video-only.mp4");
+    const gop = SEGMENT_SECONDS * FPS;
     const gopArgs: string[] = [];
-    appendLockedGopArgs(gopArgs, SEGMENT_SECONDS * FPS);
+    appendLockedGopArgs(gopArgs, gop);
+    gopArgs.push("-x264-params", lockedGopCodecParams("h264", gop));
     run([
       "-f",
       "lavfi",
@@ -315,8 +336,6 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
   });
 
   it("starts every video segment on a keyframe", async () => {
-    // A segment opening on a P-frame cannot be decoded standalone, so a player
-    // seeking to it shows garbage.
     const { packageHls } = await import("./chunkEncoder.js");
     const outputDir = join(dir, "out");
 
@@ -359,11 +378,9 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
     expect(readdirSync(outputDir).filter((f) => f.startsWith("audio"))).toHaveLength(0);
   });
 
-  it("keeps audio aligned to video by preserving the AAC priming packet", async () => {
-    // Guards the "no -avoid_negative_ts" decision (#3487). MPEG-TS has no edit
-    // list, so the priming surfaces as a leading audio packet one AAC frame
-    // ahead of the first presentable sample, which must line up with video.
+  it("starts at PTS 0 with the AAC priming packet one frame ahead of video", async () => {
     const { packageHls } = await import("./chunkEncoder.js");
+    const AAC_FRAME_SECONDS = 1024 / 44100;
     const outputDir = join(dir, "out");
 
     await packageHls(lockedVideo(), aacSidecar(), outputDir, {
@@ -399,14 +416,12 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
       ]).split("\n")[0]!,
     );
 
-    expect(audioPts[0]).toBeCloseTo(audioPts[1]!, 6);
-    expect(audioPts[2]).toBeCloseTo(videoPts, 3);
+    expect(audioPts[0]).toBeCloseTo(0, 3);
+    expect(videoPts).toBeCloseTo(AAC_FRAME_SECONDS, 3);
+    expect(audioPts[1]).toBeCloseTo(videoPts, 3);
   });
 
   it("cannot cut on time without the GOP lock", async () => {
-    // Why the GOP lock is a prerequisite and not an optimization: `-c copy`
-    // cuts only at existing keyframes, and libx264's default keyint leaves one
-    // IDR in a 4 s clip, so the same call yields a single 4 s segment.
     const { packageHls } = await import("./chunkEncoder.js");
     const unlocked = join(dir, "unlocked.mp4");
     run([
