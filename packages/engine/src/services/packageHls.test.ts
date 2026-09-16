@@ -11,6 +11,7 @@ import {
   HLS_VIDEO_PLAYLIST,
   appendLockedGopArgs,
   lockedGopCodecParams,
+  stripAudioOnlyVariants,
 } from "./chunkEncoder.js";
 
 const HAS_FFMPEG = spawnSync(getFfmpegBinary(), ["-version"], { encoding: "utf-8" }).status === 0;
@@ -188,6 +189,38 @@ describe("packageHls arguments", () => {
   });
 });
 
+describe("stripAudioOnlyVariants", () => {
+  // Shape ffmpeg 7 writes for `v:0,agroup:aud a:0,agroup:aud`, trimmed.
+  const MEDIA =
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="group_aud",NAME="audio_1",DEFAULT=YES,URI="audio.m3u8"';
+  const VIDEO_VARIANT =
+    '#EXT-X-STREAM-INF:BANDWIDTH=49256,RESOLUTION=320x180,CODECS="avc1.42c00d,mp4a.40.2",AUDIO="group_aud"';
+  const AUDIO_VARIANT = '#EXT-X-STREAM-INF:BANDWIDTH=231375,CODECS="mp4a.40.2",AUDIO="group_aud"';
+
+  it("removes the audio-only variant and its URI, keeping the rendition group", () => {
+    const master = [
+      "#EXTM3U",
+      "#EXT-X-VERSION:3",
+      MEDIA,
+      VIDEO_VARIANT,
+      "video.m3u8",
+      "",
+      AUDIO_VARIANT,
+      "audio.m3u8",
+      "",
+    ].join("\n");
+
+    expect(stripAudioOnlyVariants(master)).toBe(
+      ["#EXTM3U", "#EXT-X-VERSION:3", MEDIA, VIDEO_VARIANT, "video.m3u8", ""].join("\n"),
+    );
+  });
+
+  it("leaves a master with only a video variant untouched", () => {
+    const master = ["#EXTM3U", "#EXT-X-VERSION:3", VIDEO_VARIANT, "video.m3u8", ""].join("\n");
+    expect(stripAudioOnlyVariants(master)).toBe(master);
+  });
+});
+
 describe("packageHls segmentSeconds validation", () => {
   it.each([0, -4, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
     "throws on segmentSeconds=%s",
@@ -316,6 +349,15 @@ describe.skipIf(!HAS_FFMPEG)("packageHls against real ffmpeg", () => {
     expect(master).toContain(HLS_VIDEO_PLAYLIST);
     expect(master).toContain(HLS_AUDIO_PLAYLIST);
     expect(master).toContain("#EXT-X-MEDIA:TYPE=AUDIO");
+
+    // One selectable variant: the video, with audio attached as a rendition
+    // group. ffmpeg also emits the audio as its own variant; that is stripped
+    // so a bandwidth-driven player can never pick sound without picture.
+    const variants = master.split("\n").filter((line) => line.startsWith("#EXT-X-STREAM-INF:"));
+    expect(variants).toHaveLength(1);
+    expect(variants[0]).toContain("RESOLUTION=");
+    expect(variants[0]).toContain('AUDIO="');
+    expect(master).toMatch(/#EXT-X-MEDIA:TYPE=AUDIO[^\n]*URI="audio\.m3u8"/);
 
     const videoPlaylist = readFileSync(join(outputDir, HLS_VIDEO_PLAYLIST), "utf-8");
     expect(videoPlaylist).toContain("#EXT-X-PLAYLIST-TYPE:VOD");
