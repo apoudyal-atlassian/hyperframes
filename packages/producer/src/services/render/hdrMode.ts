@@ -31,8 +31,12 @@ type HdrModeInput = {
 };
 
 /**
- * The "format can't carry HDR, falling back to SDR" warning. Every non-mp4
- * format exists for alpha, which an HDR signal cannot be combined with.
+ * The "format can't carry HDR, falling back to SDR" warning.
+ *
+ * `hls` is the one non-mp4 format refused for a reason other than alpha: HDR10
+ * would need HEVC in fMP4 segments, and v1 packages H.264 into MPEG-TS.
+ * `force-hdr` + `hls` is rejected outright before the render starts (see
+ * `validateHlsRenderConfig`), so only auto-detected HDR reaches this path.
  */
 function formatDowngradeWarning(
   outputFormat: NonNullable<RenderConfig["format"]>,
@@ -41,9 +45,13 @@ function formatDowngradeWarning(
   const hdrSourceReason = forcedHdrWithoutSources
     ? "HDR was forced without detected HDR sources"
     : "HDR source detected";
+  const formatReason =
+    outputFormat === "hls"
+      ? "HLS output is SDR-only (H.264 in MPEG-TS)"
+      : "HDR + alpha is not supported";
   return (
     `[Render] ${hdrSourceReason}, but format is "${outputFormat}" — falling back to SDR. ` +
-    `HDR + alpha is not supported. Use --format mp4 for HDR10 output.`
+    `${formatReason}. Use --format mp4 for HDR10 output.`
   );
 }
 
