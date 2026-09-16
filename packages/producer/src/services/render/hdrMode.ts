@@ -30,6 +30,23 @@ type HdrModeInput = {
   log: ProducerLogger;
 };
 
+/**
+ * The "format can't carry HDR, falling back to SDR" warning. Every non-mp4
+ * format exists for alpha, which an HDR signal cannot be combined with.
+ */
+function formatDowngradeWarning(
+  outputFormat: NonNullable<RenderConfig["format"]>,
+  forcedHdrWithoutSources: boolean,
+): string {
+  const hdrSourceReason = forcedHdrWithoutSources
+    ? "HDR was forced without detected HDR sources"
+    : "HDR source detected";
+  return (
+    `[Render] ${hdrSourceReason}, but format is "${outputFormat}" — falling back to SDR. ` +
+    `HDR + alpha is not supported. Use --format mp4 for HDR10 output.`
+  );
+}
+
 export function findRenderHdrAutoPromotionTrigger(input: {
   extractionResult: ExtractionResult | null | undefined;
   videos: readonly { id: string; src: string }[];
@@ -107,13 +124,7 @@ export function resolveEffectiveHdrMode(input: HdrModeInput): EffectiveHdr {
   }
 
   if (effectiveHdr && input.outputFormat !== "mp4") {
-    const hdrSourceReason = forcedHdrWithoutSources
-      ? "HDR was forced without detected HDR sources"
-      : "HDR source detected";
-    input.log.warn(
-      `[Render] ${hdrSourceReason}, but format is "${input.outputFormat}" — falling back to SDR. ` +
-        `HDR + alpha is not supported. Use --format mp4 for HDR10 output.`,
-    );
+    input.log.warn(formatDowngradeWarning(input.outputFormat, forcedHdrWithoutSources));
     effectiveHdr = undefined;
   }
 
