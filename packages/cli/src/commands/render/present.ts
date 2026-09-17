@@ -42,6 +42,9 @@ function presentRenderSummary(plan: RenderPlan): void {
   if (plan.outputResolution) {
     console.log(c.dim("   Output resolution: " + plan.outputResolution));
   }
+  if (plan.format === "hls") {
+    console.log(c.dim(`   HLS: ${plan.hlsSegmentSeconds}s segments in a playlist directory`));
+  }
   if (plan.useGpu || plan.browserGpuMode !== "software") {
     const gpuModes = [
       plan.useGpu ? "encoder GPU" : null,
